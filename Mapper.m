@@ -539,12 +539,8 @@ static void trackDownSwipe(DownSwipe *swipe, Sample *sample) {
 - (void)applicationDidFinishLaunching:(NSNotification *)note {
     _deviceStatus = startCapture();
     self.item = [NSStatusBar.systemStatusBar statusItemWithLength:NSVariableStatusItemLength];
-    NSImage *icon = [NSBundle.mainBundle imageForResource:@"MouseSpark"];
-    icon.size = NSMakeSize(18, 18);
-    icon.template = YES;
-    self.item.button.image = icon;
     self.item.button.accessibilityLabel = @"Magicker Mouse";
-    if (!icon) self.item.button.title = @"Mouse";
+    [self applyMenuBarIcon];
     [self updateStatusIcon];
     NSMenu *menu = [NSMenu new];
     self.toggle = [menu addItemWithTitle:@"Enable Gestures" action:@selector(toggleGestures:) keyEquivalent:@""];
@@ -580,10 +576,52 @@ static void trackDownSwipe(DownSwipe *swipe, Sample *sample) {
     [menu addItem:NSMenuItem.separatorItem];
     NSMenuItem *quit = [menu addItemWithTitle:@"Quit Magicker Mouse" action:@selector(terminate:) keyEquivalent:@"q"];
     quit.target = NSApp;
+    NSMenuItem *iconItem = [menu insertItemWithTitle:@"Menu Bar Icon" action:nil
+        keyEquivalent:@"" atIndex:menu.numberOfItems - 1];
+    iconItem.submenu = [NSMenu new];
+    NSArray *titles = @[@"Classic Mouse", @"Black Mouse", @"Angled Mouse", @"Wand",
+                        @"Wizard Mouse", @"Spark Mouse", @"Wizard Mouse Face",
+                        @"Potion Mouse", @"Cosmic Mouse", @"Wizard Hat", @"Cheese Spell",
+                        @"Lightning Mouse", @"Crystal Mouse"];
+    for (NSString *title in titles) {
+        NSMenuItem *choice = [iconItem.submenu addItemWithTitle:title
+            action:@selector(selectMenuBarIcon:) keyEquivalent:@""];
+        choice.target = self;
+        choice.tag = iconItem.submenu.numberOfItems - 1;
+        choice.state = choice.tag == [self menuBarIconIndex] ? NSControlStateValueOn : NSControlStateValueOff;
+    }
     self.item.menu = menu;
     [NSUserDefaults.standardUserDefaults registerDefaults:@{@"GesturesEnabled": @YES}];
     [self refreshConnection:nil];
     [NSTimer scheduledTimerWithTimeInterval:0.02 target:self selector:@selector(tick:) userInfo:nil repeats:YES];
+}
+
+- (NSInteger)menuBarIconIndex {
+    NSInteger index = [NSUserDefaults.standardUserDefaults integerForKey:@"MenuBarIcon"];
+    return index >= 0 && index < 13 ? index : 0;
+}
+
+- (void)applyMenuBarIcon {
+    NSArray *resources = @[@"MouseSpark", @"BlackMouse", @"AngledMouse", @"Wand",
+                           @"WizardMouse", @"SparkMouse", @"WizardMouseFace",
+                           @"PotionMouse", @"CosmicMouse", @"WizardHat", @"CheeseSpell",
+                           @"LightningMouse", @"CrystalMouse"];
+    NSInteger index = [self menuBarIconIndex];
+    NSImage *icon = [[NSBundle.mainBundle imageForResource:resources[index]] copy];
+    if (icon && icon.size.height > 0) {
+        CGFloat scale = 18.0 / MAX(icon.size.width, icon.size.height);
+        icon.size = NSMakeSize(icon.size.width * scale, icon.size.height * scale);
+        icon.template = index != 1 && index < 7;
+    }
+    self.item.button.image = icon;
+    self.item.button.title = icon ? @"" : @"Mouse";
+}
+
+- (void)selectMenuBarIcon:(NSMenuItem *)sender {
+    [NSUserDefaults.standardUserDefaults setInteger:sender.tag forKey:@"MenuBarIcon"];
+    for (NSMenuItem *choice in sender.menu.itemArray)
+        choice.state = choice == sender ? NSControlStateValueOn : NSControlStateValueOff;
+    [self applyMenuBarIcon];
 }
 
 - (void)updateStatusIcon {
