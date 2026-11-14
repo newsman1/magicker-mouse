@@ -1,4 +1,5 @@
 #import <Cocoa/Cocoa.h>
+#import <IOKit/IOKitLib.h>
 #import <ApplicationServices/ApplicationServices.h>
 #import <dlfcn.h>
 #import <pthread.h>
@@ -270,16 +271,28 @@ static void flushTap(Gesture *g, double time) {
 
 static void processSample(Gesture *g, Sample *s) {
     double now = s->time;
-    if (g->lastFrame && now - g->lastFrame > 0.35) {
-        g->tracking = NO;
-        g->anchorSide = 0;
-        g->blocked = YES;
-    }
-    g->lastFrame = now;
-    flushTap(g, now);
     int active[16], count = 0;
     for (int i = 0; i < s->count; i++)
         if (s->states[i] == 3 || s->states[i] == 4) active[count++] = i;
+    if (g->lastFrame && now - g->lastFrame > 0.35) {
+        // A stationary resting finger can remain down while the mouse stops sending frames.
+        // Resume only when that same anchor is still present and no gesture was in progress.
+        BOOL restingAnchor = NO;
+        if (!g->tracking && !g->blocked && g->anchorSide && count <= 2) {
+            for (int i = 0; i < count; i++) {
+                int index = active[i];
+                restingAnchor |= s->ids[index] == g->anchorID &&
+                    sideOf(s->points[index]) == g->anchorSide;
+            }
+        }
+        if (!restingAnchor) {
+            g->tracking = NO;
+            g->anchorSide = 0;
+            g->blocked = YES;
+        }
+    }
+    g->lastFrame = now;
+    flushTap(g, now);
     if (count <= 1) {
         if (g->tracking && g->sawDown && count == 1 && s->ids[active[0]] == g->anchorID) {
             double elapsed = now - g->began;
@@ -329,7 +342,7 @@ static void processSample(Gesture *g, Sample *s) {
             g->blocked = YES;
             return;
         }
-        if (now - g->anchorSince < 0.20) {
+        if (now - g->anchorSince < 0.04) {
             g->blocked = YES;
             return;
         }
@@ -538,7 +551,9 @@ static void trackDownSwipe(DownSwipe *swipe, Sample *sample) {
     id _globalMonitor;
     id _localMonitor;
     NSString *_deviceStatus;
-    NSTimer *_reconnectTimer;
+    IONotificationPortRef _deviceNotifications;
+    io_iterator_t _matchedDevices, _removedDevices;
+    NSUInteger _connectionRevision;
     NSMenuItem *_manualReconnect;
 }
 
@@ -673,17 +688,62 @@ static void trackDownSwipe(DownSwipe *swipe, Sample *sample) {
     [self cancelForInput];
 }
 
+static void drainDeviceIterator(io_iterator_t iterator) {
+    io_service_t service;
+    while ((service = IOIteratorNext(iterator))) IOObjectRelease(service);
+}
+
+static void deviceListChanged(void *context, io_iterator_t iterator) {
+    drainDeviceIterator(iterator);
+    Mapper *mapper = (__bridge Mapper *)context;
+    [mapper scheduleConnectionRefresh];
+}
+
+- (void)scheduleConnectionRefresh {
+    NSUInteger revision = ++_connectionRevision;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 350 * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{
+        if (self->_deviceNotifications && revision == self->_connectionRevision)
+            [self refreshConnection:nil];
+    });
+}
+
+- (void)stopDeviceNotifications {
+    ++_connectionRevision;
+    if (_matchedDevices) IOObjectRelease(_matchedDevices);
+    if (_removedDevices) IOObjectRelease(_removedDevices);
+    if (_deviceNotifications) IONotificationPortDestroy(_deviceNotifications);
+    _matchedDevices = _removedDevices = IO_OBJECT_NULL;
+    _deviceNotifications = NULL;
+}
+
 - (void)configureAutoReconnect:(NSMenuItem *)item {
+    [self stopDeviceNotifications];
     BOOL enabled = [NSUserDefaults.standardUserDefaults boolForKey:@"AutoReconnect"];
-    item.state = enabled ? NSControlStateValueOn : NSControlStateValueOff;
-    _manualReconnect.hidden = enabled;
-    [_reconnectTimer invalidate];
-    _reconnectTimer = nil;
     if (enabled) {
-        _reconnectTimer = [NSTimer scheduledTimerWithTimeInterval:2.0 target:self
-            selector:@selector(refreshConnection:) userInfo:nil repeats:YES];
-        _reconnectTimer.tolerance = 0.25;
+        _deviceNotifications = IONotificationPortCreate(kIOMainPortDefault);
+        if (_deviceNotifications) {
+            void *context = (__bridge void *)self;
+            kern_return_t added = IOServiceAddMatchingNotification(_deviceNotifications,
+                kIOFirstMatchNotification, IOServiceMatching("AppleMultitouchDevice"),
+                deviceListChanged, context, &_matchedDevices);
+            kern_return_t removed = IOServiceAddMatchingNotification(_deviceNotifications,
+                kIOTerminatedNotification, IOServiceMatching("AppleMultitouchDevice"),
+                deviceListChanged, context, &_removedDevices);
+            if (added == KERN_SUCCESS && removed == KERN_SUCCESS) {
+                drainDeviceIterator(_matchedDevices);
+                drainDeviceIterator(_removedDevices);
+                IONotificationPortSetDispatchQueue(_deviceNotifications, dispatch_get_main_queue());
+            } else {
+                [self stopDeviceNotifications];
+            }
+        }
     }
+    item.state = _deviceNotifications ? NSControlStateValueOn : NSControlStateValueOff;
+    _manualReconnect.hidden = NO;
+}
+
+- (void)applicationWillTerminate:(NSNotification *)notification {
+    [self stopDeviceNotifications];
 }
 
 - (void)toggleAutoReconnect:(NSMenuItem *)sender {
