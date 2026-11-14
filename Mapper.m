@@ -286,9 +286,15 @@ static void processSample(Gesture *g, Sample *s) {
             if (g->swipeDirection && elapsed <= 1.5) {
                 performAction(g->swipeDirection < 0 ? 4 : 5, g->target);
             } else if (!g->moved && elapsed >= 0.05 && elapsed <= 0.45) {
-                g->pendingSide = g->side;
-                g->pendingTarget = g->target;
-                g->deadline = now + 0.32;
+                NSInteger gesture = g->side < 0 ? 0 : 1;
+                Action action = selectedAction(gesture);
+                if (action == ActionPreviousTab || action == ActionNextTab) {
+                    performAction(gesture, g->target);
+                } else {
+                    g->pendingSide = g->side;
+                    g->pendingTarget = g->target;
+                    g->deadline = now + 0.32;
+                }
             }
         }
         g->tracking = NO;

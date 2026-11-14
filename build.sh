@@ -9,4 +9,4 @@ xcrun clang -fobjc-arc -mmacosx-version-min=15.0 -framework Cocoa \
     -framework ApplicationServices Mapper.m -o "$app/Contents/MacOS/MagicMouseMapper"
 codesign --force --sign - "$app"
 codesign --verify --strict "$app"
-ditto -c -k --norsrc --keepParent "$app" build/Magicker-Mouse-18.zip
+ditto -c -k --norsrc --keepParent "$app" build/Magicker-Mouse-19.zip
