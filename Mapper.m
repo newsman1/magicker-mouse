@@ -147,16 +147,19 @@ static BOOL browser(NSRunningApplication *app) {
 
 typedef NS_ENUM(NSInteger, Action) {
     ActionDisabled, ActionPreviousTab, ActionNextTab, ActionCopy, ActionPaste,
-    ActionBackspace, ActionEnter, ActionBack, ActionForward, ActionUndo, ActionRedo, ActionSelectAll, ActionEscape, ActionSpace, ActionUp, ActionDown, ActionLeft, ActionRight, ActionLaunchpad, ActionNotificationCenter, ActionCloseTab, ActionRefresh, ActionMacro, ActionCloseWindow, ActionAppExpose
+    ActionBackspace, ActionEnter, ActionBack, ActionForward, ActionUndo, ActionRedo, ActionSelectAll, ActionEscape, ActionSpace, ActionUp, ActionDown, ActionLeft, ActionRight, ActionLaunchpad, ActionNotificationCenter, ActionCloseTab, ActionRefresh, ActionMacro, ActionCloseWindow, ActionAppExpose, ActionReopenTab, ActionNewTab,
+    ActionPreviousApp, ActionCycleWindow, ActionMiddleClick
 };
 
 static NSArray<NSString *> *actionNames(void) {
     return @[@"Disabled", @"Previous Tab", @"Next Tab", @"Copy", @"Paste",
-             @"Backspace", @"Enter", @"Back", @"Forward", @"Undo", @"Redo", @"Select All", @"Escape", @"Space", @"Up Arrow", @"Down Arrow", @"Left Arrow", @"Right Arrow", @"Launchpad", @"Notification Center", @"Close Tab", @"Refresh", @"Custom Macro…", @"Close Window", @"App Exposé"];
+             @"Backspace", @"Enter", @"Back", @"Forward", @"Undo", @"Redo", @"Select All", @"Escape", @"Space", @"Up Arrow", @"Down Arrow", @"Left Arrow", @"Right Arrow", @"Launchpad", @"Notification Center", @"Close Tab", @"Refresh", @"Custom Macro…", @"Close Window", @"App Exposé",
+             @"Reopen Closed Tab", @"New Tab", @"Switch to Previous App",
+             @"Switch Window Within App", @"Middle Click"];
 }
 
 static NSArray<NSString *> *gestureNames(void) {
-    return @[@"Left Tap", @"Right Tap", @"Left Hold", @"Right Hold", @"Swipe Left", @"Swipe Right", @"Three-Finger Tap", @"Four-Finger Tap", @"Three-Finger Hold", @"Four-Finger Hold", @"Two-Finger Tap", @"Three-Finger Double Tap", @"Two-Finger Swipe Down"];
+    return @[@"Left Tap", @"Right Tap", @"Left Hold", @"Right Hold", @"Swipe Left", @"Swipe Right", @"Three-Finger Tap", @"Four-Finger Tap", @"Three-Finger Hold", @"Four-Finger Hold", @"Two-Finger Tap", @"Three-Finger Double Tap", @"Two-Finger Swipe Down", @"Two-Finger Hold"];
 }
 
 static NSString *mappingKey(NSInteger gesture) {
@@ -166,7 +169,7 @@ static NSString *mappingKey(NSInteger gesture) {
 static Action selectedAction(NSInteger gesture) {
     static const Action defaults[] = {ActionPreviousTab, ActionNextTab, ActionPaste, ActionCopy,
         ActionBackspace, ActionEnter, ActionNotificationCenter, ActionDisabled,
-        ActionLaunchpad, ActionDisabled, ActionAppExpose, ActionCloseWindow, ActionRefresh};
+        ActionLaunchpad, ActionDisabled, ActionAppExpose, ActionCloseWindow, ActionRefresh, ActionDisabled};
     NSNumber *saved = [NSUserDefaults.standardUserDefaults objectForKey:mappingKey(gesture)];
     NSInteger value = saved ? saved.integerValue : defaults[gesture];
     return value >= 0 && value < (NSInteger)actionNames().count ? value : ActionDisabled;
@@ -204,6 +207,9 @@ static void playMacro(NSArray<NSArray<NSNumber *> *> *steps, NSUInteger index, p
     });
 }
 
+static NSRunningApplication *lastActiveApp;
+static NSRunningApplication *previousApp;
+
 static void performAction(NSInteger gesture, pid_t target) {
     Action action = selectedAction(gesture);
     NSRunningApplication *app = NSWorkspace.sharedWorkspace.frontmostApplication;
@@ -211,6 +217,26 @@ static void performAction(NSInteger gesture, pid_t target) {
     if (target == NSProcessInfo.processInfo.processIdentifier) return;
     if (action >= ActionPreviousTab && action <= ActionNextTab && !browser(app)) return;
     if ((action == ActionBack || action == ActionForward) && !browser(app)) return;
+    if (action == ActionPreviousApp) {
+        if (previousApp && !previousApp.terminated && previousApp.processIdentifier != target)
+            [previousApp activateWithOptions:0];
+        return;
+    }
+    if (action == ActionMiddleClick) {
+        CGEventRef location = CGEventCreate(NULL);
+        if (!location) return;
+        CGPoint point = CGEventGetLocation(location);
+        CFRelease(location);
+        CGEventRef down = CGEventCreateMouseEvent(NULL, kCGEventOtherMouseDown, point, kCGMouseButtonCenter);
+        CGEventRef up = CGEventCreateMouseEvent(NULL, kCGEventOtherMouseUp, point, kCGMouseButtonCenter);
+        if (down && up) {
+            CGEventPost(kCGHIDEventTap, down);
+            CGEventPost(kCGHIDEventTap, up);
+        }
+        if (down) CFRelease(down);
+        if (up) CFRelease(up);
+        return;
+    }
     if (action == ActionLaunchpad) {
         NSURL *url = [NSURL fileURLWithPath:@"/System/Applications/Launchpad.app"];
         if (![NSWorkspace.sharedWorkspace openURL:url])
@@ -255,6 +281,9 @@ static void performAction(NSInteger gesture, pid_t target) {
         case ActionLeft: key = 123; flags = 0; break;
         case ActionRight: key = 124; flags = 0; break;
         case ActionCloseWindow: key = 13; break;
+        case ActionReopenTab: if (!browser(app)) return; key = 17; flags |= kCGEventFlagMaskShift; break;
+        case ActionNewTab: if (!browser(app)) return; key = 17; break;
+        case ActionCycleWindow: postKey(0, 50, kCGEventFlagMaskCommand); return;
         case ActionCloseTab: if (!browser(app)) return; key = 13; break;
         case ActionRefresh: if (!browser(app)) return; key = 15; break;
         default: return;
@@ -342,7 +371,7 @@ static void processSample(Gesture *g, Sample *s) {
             g->blocked = YES;
             return;
         }
-        if (now - g->anchorSince < 0.04) {
+        if (now - g->anchorSince < (selectedAction(13) == ActionDisabled ? 0.04 : 0.12)) {
             g->blocked = YES;
             return;
         }
@@ -436,8 +465,8 @@ static void processMultiFingerTap(MultiFingerTap *tap, Sample *sample) {
         tap->blocked = YES;
     }
     tap->peak = MAX(tap->peak, active);
-    if (!tap->blocked && active >= 3 && active == tap->count && now - tap->began >= 0.75) {
-        performAction(active == 3 ? 8 : 9, tap->target);
+    if (!tap->blocked && (active >= 3 || (active == 2 && selectedAction(13) != ActionDisabled)) && active == tap->count && now - tap->began >= 0.75) {
+        performAction(active == 2 ? 13 : active == 3 ? 8 : 9, tap->target);
         tap->blocked = YES;
     }
     if (active == 0) {
@@ -558,6 +587,10 @@ static void trackDownSwipe(DownSwipe *swipe, Sample *sample) {
 }
 
 - (void)applicationDidFinishLaunching:(NSNotification *)note {
+    NSWorkspace *workspace = NSWorkspace.sharedWorkspace;
+    lastActiveApp = workspace.frontmostApplication;
+    [workspace.notificationCenter addObserver:self selector:@selector(activeAppChanged:)
+        name:NSWorkspaceDidActivateApplicationNotification object:nil];
     _deviceStatus = startCapture();
     self.item = [NSStatusBar.systemStatusBar statusItemWithLength:NSVariableStatusItemLength];
     self.item.button.accessibilityLabel = @"Magicker Mouse";
@@ -571,7 +604,7 @@ static void trackDownSwipe(DownSwipe *swipe, Sample *sample) {
     NSMenuItem *mappings = [menu addItemWithTitle:@"Gesture Actions" action:nil keyEquivalent:@""];
     mappings.submenu = [NSMenu new];
     NSArray *names = gestureNames();
-    const NSInteger menuOrder[] = {0, 1, 2, 3, 4, 5, 10, 12, 6, 11, 8, 7, 9};
+    const NSInteger menuOrder[] = {0, 1, 2, 3, 4, 5, 10, 13, 12, 6, 11, 8, 7, 9};
     for (NSUInteger index = 0; index < sizeof(menuOrder) / sizeof(menuOrder[0]); index++) {
         NSInteger gesture = menuOrder[index];
         NSMenuItem *row = [mappings.submenu addItemWithTitle:names[gesture] action:nil keyEquivalent:@""];
@@ -740,6 +773,15 @@ static void deviceListChanged(void *context, io_iterator_t iterator) {
     }
     item.state = _deviceNotifications ? NSControlStateValueOn : NSControlStateValueOff;
     _manualReconnect.hidden = NO;
+}
+
+- (void)activeAppChanged:(NSNotification *)notification {
+    NSRunningApplication *app = notification.userInfo[NSWorkspaceApplicationKey];
+    if (!app || app.activationPolicy != NSApplicationActivationPolicyRegular ||
+        app.processIdentifier == NSProcessInfo.processInfo.processIdentifier ||
+        app.processIdentifier == lastActiveApp.processIdentifier) return;
+    previousApp = lastActiveApp;
+    lastActiveApp = app;
 }
 
 - (void)applicationWillTerminate:(NSNotification *)notification {
