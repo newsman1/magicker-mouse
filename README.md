@@ -4,7 +4,7 @@ A macOS menu-bar app that maps Apple Magic Mouse taps, holds, and swipes to brow
 
 ## Install
 
-Download **Magicker-Mouse-22.zip** from [Releases](../../releases), unzip it, and move **Magicker Mouse.app** to Applications. Open it and grant Accessibility access under **System Settings → Privacy & Security → Accessibility** when prompted. If macOS blocks the download, review the prompt in Privacy & Security before opening it. The release build is ad hoc signed and has not been notarized.
+Download **Magicker-Mouse-24.zip** from [Releases](../../releases), unzip it, and move **Magicker Mouse.app** to Applications. Open it and grant Accessibility access under **System Settings → Privacy & Security → Accessibility** when prompted. If macOS blocks the download, review the prompt in Privacy & Security before opening it. The release build is ad hoc signed and has not been notarized.
 
 Use **Gesture Actions** in the menu bar to customize or disable each gesture. For the left and right taps, holds, and horizontal swipes, plant one finger and move or touch with the other. For Refresh, slide both fingers toward your palm together and lift. macOS may also scroll during that motion.
 
@@ -14,6 +14,7 @@ Use **Gesture Actions** in the menu bar to customize or disable each gesture. Fo
 | Left hold / Right hold | Paste / Copy |
 | Swipe left / Swipe right | Backspace / Enter |
 | Two-finger tap | App Exposé |
+| Two-finger hold | Disabled |
 | Two-finger swipe down | Refresh |
 | Three-finger tap | Notification Center |
 | Three-finger double tap | Close Window |
