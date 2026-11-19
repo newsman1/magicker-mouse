@@ -1,4 +1,5 @@
 #import <Cocoa/Cocoa.h>
+#import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 #import <IOKit/IOKitLib.h>
 #import <ApplicationServices/ApplicationServices.h>
 #import <dlfcn.h>
@@ -166,13 +167,33 @@ static NSString *mappingKey(NSInteger gesture) {
     return [@"gesture." stringByAppendingString:gestureNames()[gesture]];
 }
 
-static Action selectedAction(NSInteger gesture) {
+static void registerDefaultSettings(void) {
+    // Registration supplies fresh-install defaults without overwriting saved preferences.
+    [NSUserDefaults.standardUserDefaults registerDefaults:@{
+        @"GesturesEnabled": @YES, @"AutoReconnect": @YES, @"MenuBarIcon": @11,
+        @"AppGestureExceptions": @{
+            @"com.adobe.PremierePro.22": @{@"name": @"Adobe Premiere Pro 2022",
+                @"disabled": @[@"Two-Finger Hold"]}
+        }
+    }];
+}
+
+static Action globalAction(NSInteger gesture) {
     static const Action defaults[] = {ActionPreviousTab, ActionNextTab, ActionPaste, ActionCopy,
         ActionBackspace, ActionEnter, ActionNotificationCenter, ActionDisabled,
-        ActionLaunchpad, ActionDisabled, ActionAppExpose, ActionCloseWindow, ActionRefresh, ActionDisabled};
+        ActionLaunchpad, ActionDisabled, ActionSpace, ActionAppExpose, ActionRefresh, ActionCloseWindow};
     NSNumber *saved = [NSUserDefaults.standardUserDefaults objectForKey:mappingKey(gesture)];
     NSInteger value = saved ? saved.integerValue : defaults[gesture];
     return value >= 0 && value < (NSInteger)actionNames().count ? value : ActionDisabled;
+}
+
+// Resolve exceptions against the foreground app; global mappings remain untouched.
+static Action selectedAction(NSInteger gesture) {
+    NSString *bundle = NSWorkspace.sharedWorkspace.frontmostApplication.bundleIdentifier;
+    NSDictionary *rules = [NSUserDefaults.standardUserDefaults dictionaryForKey:@"AppGestureExceptions"];
+    NSDictionary *rule = bundle ? rules[bundle] : nil;
+    if ([rule[@"disabled"] containsObject:gestureNames()[gesture]]) return ActionDisabled;
+    return globalAction(gesture);
 }
 
 static void postKey(pid_t target, CGKeyCode key, CGEventFlags flags) {
@@ -563,7 +584,7 @@ static void trackDownSwipe(DownSwipe *swipe, Sample *sample) {
 }
 @end
 
-@interface Mapper : NSObject <NSApplicationDelegate>
+@interface Mapper : NSObject <NSApplicationDelegate, NSMenuDelegate>
 @property NSStatusItem *item;
 @property NSMenuItem *toggle;
 @property NSMenuItem *captureStatus;
@@ -587,6 +608,7 @@ static void trackDownSwipe(DownSwipe *swipe, Sample *sample) {
 }
 
 - (void)applicationDidFinishLaunching:(NSNotification *)note {
+    registerDefaultSettings();
     NSWorkspace *workspace = NSWorkspace.sharedWorkspace;
     lastActiveApp = workspace.frontmostApplication;
     [workspace.notificationCenter addObserver:self selector:@selector(activeAppChanged:)
@@ -616,9 +638,12 @@ static void trackDownSwipe(DownSwipe *swipe, Sample *sample) {
             choice.target = self;
             choice.tag = action;
             choice.representedObject = @(gesture);
-            choice.state = selectedAction(gesture) == action ? NSControlStateValueOn : NSControlStateValueOff;
+            choice.state = globalAction(gesture) == action ? NSControlStateValueOn : NSControlStateValueOff;
         }
     }
+    NSMenuItem *exceptions = [menu addItemWithTitle:@"App Exceptions" action:nil keyEquivalent:@""];
+    exceptions.submenu = [NSMenu new];
+    exceptions.submenu.delegate = self;
     [menu addItem:NSMenuItem.separatorItem];
     NSMenuItem *autoReconnect = [menu addItemWithTitle:@"Auto Reconnect"
         action:@selector(toggleAutoReconnect:) keyEquivalent:@""];
@@ -645,7 +670,6 @@ static void trackDownSwipe(DownSwipe *swipe, Sample *sample) {
         choice.state = choice.tag == [self menuBarIconIndex] ? NSControlStateValueOn : NSControlStateValueOff;
     }
     self.item.menu = menu;
-    [NSUserDefaults.standardUserDefaults registerDefaults:@{@"GesturesEnabled": @YES}];
     [self refreshConnection:nil];
     [NSTimer scheduledTimerWithTimeInterval:0.02 target:self selector:@selector(tick:) userInfo:nil repeats:YES];
 }
@@ -681,6 +705,76 @@ static void trackDownSwipe(DownSwipe *swipe, Sample *sample) {
 - (void)updateStatusIcon {
     self.item.button.alphaValue = self.enabled ? 1 : 0.5;
     self.item.button.toolTip = self.enabled ? @"Magicker Mouse · Enabled" : @"Magicker Mouse · Paused";
+}
+
+- (void)menuNeedsUpdate:(NSMenu *)menu {
+    [menu removeAllItems];
+    NSMenuItem *add = [menu addItemWithTitle:@"Add Application…" action:@selector(addExceptionApp:) keyEquivalent:@""];
+    add.target = self;
+    NSDictionary *rules = [NSUserDefaults.standardUserDefaults dictionaryForKey:@"AppGestureExceptions"] ?: @{};
+    const NSInteger order[] = {0, 1, 2, 3, 4, 5, 10, 13, 12, 6, 11, 8, 7, 9};
+    for (NSString *bundle in [rules.allKeys sortedArrayUsingSelector:@selector(localizedCaseInsensitiveCompare:)]) {
+        NSDictionary *rule = rules[bundle];
+        NSMenuItem *app = [menu addItemWithTitle:rule[@"name"] ?: bundle action:nil keyEquivalent:@""];
+        app.submenu = [NSMenu new];
+        NSMenuItem *hint = [app.submenu addItemWithTitle:@"Checked gestures are disabled in this app" action:nil keyEquivalent:@""];
+        hint.enabled = NO;
+        for (NSUInteger i = 0; i < sizeof(order) / sizeof(order[0]); i++) {
+            NSString *name = gestureNames()[order[i]];
+            NSMenuItem *item = [app.submenu addItemWithTitle:name action:@selector(toggleException:) keyEquivalent:@""];
+            item.target = self;
+            item.representedObject = @[@"toggle", bundle, name];
+            item.state = [rule[@"disabled"] containsObject:name] ? NSControlStateValueOn : NSControlStateValueOff;
+        }
+        [app.submenu addItem:NSMenuItem.separatorItem];
+        for (NSArray *entry in @[@[@"Disable All Gestures", @"all"], @[@"Enable All Gestures", @"none"], @[@"Remove App Exception", @"remove"]]) {
+            NSMenuItem *item = [app.submenu addItemWithTitle:entry[0] action:@selector(toggleException:) keyEquivalent:@""];
+            item.target = self;
+            item.representedObject = @[entry[1], bundle];
+        }
+    }
+}
+
+- (void)addExceptionApp:(id)sender {
+    NSOpenPanel *panel = [NSOpenPanel openPanel];
+    panel.title = @"Choose an application";
+    panel.prompt = @"Add Application";
+    panel.directoryURL = [NSURL fileURLWithPath:@"/Applications"];
+    panel.canChooseDirectories = NO;
+    panel.allowsMultipleSelection = NO;
+    panel.allowedContentTypes = @[UTTypeApplicationBundle];
+    [self cancelForInput];
+    [NSApp activateIgnoringOtherApps:YES];
+    if ([panel runModal] != NSModalResponseOK) return;
+    NSBundle *app = [NSBundle bundleWithURL:panel.URL];
+    NSString *bundle = app.bundleIdentifier;
+    if (!bundle.length) return;
+    NSMutableDictionary *rules = [[NSUserDefaults.standardUserDefaults dictionaryForKey:@"AppGestureExceptions"] mutableCopy] ?: [NSMutableDictionary new];
+    if (!rules[bundle]) {
+        NSString *name = [app objectForInfoDictionaryKey:@"CFBundleDisplayName"] ?: [app objectForInfoDictionaryKey:@"CFBundleName"] ?: panel.URL.lastPathComponent;
+        rules[bundle] = @{@"name": name, @"disabled": @[]};
+        [NSUserDefaults.standardUserDefaults setObject:rules forKey:@"AppGestureExceptions"];
+    }
+}
+
+- (void)toggleException:(NSMenuItem *)sender {
+    NSArray *entry = sender.representedObject;
+    NSString *operation = entry[0], *bundle = entry[1];
+    NSMutableDictionary *rules = [[NSUserDefaults.standardUserDefaults dictionaryForKey:@"AppGestureExceptions"] mutableCopy] ?: [NSMutableDictionary new];
+    NSMutableDictionary *rule = [rules[bundle] mutableCopy];
+    if (!rule) return;
+    NSMutableArray *disabled = [rule[@"disabled"] mutableCopy] ?: [NSMutableArray new];
+    if ([operation isEqualToString:@"remove"]) [rules removeObjectForKey:bundle];
+    else {
+        if ([operation isEqualToString:@"all"]) disabled = [gestureNames() mutableCopy];
+        else if ([operation isEqualToString:@"none"]) [disabled removeAllObjects];
+        else if ([disabled containsObject:entry[2]]) [disabled removeObject:entry[2]];
+        else [disabled addObject:entry[2]];
+        rule[@"disabled"] = disabled;
+        rules[bundle] = rule;
+    }
+    [NSUserDefaults.standardUserDefaults setObject:rules forKey:@"AppGestureExceptions"];
+    [self cancelForInput];
 }
 
 - (void)changeMapping:(NSMenuItem *)sender {
